@@ -4,16 +4,17 @@ import configparser
 import logging
 from logging.handlers import RotatingFileHandler
 
+import threading
+import time
+
 import os
 import sys
 
 import tkinter as Tk
-from tkinter import ttk
 
 import vlc
 
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
+from dirsync import sync
 
 
 _isWindows = sys.platform.startswith('win')
@@ -36,15 +37,17 @@ class VLCPlaylistManager:
         # VLC player
         args = []
         if _isLinux:
-            args.append('--no-xlib')
+            args.append('--vout=qt')
+        print(args)
         self.instance = vlc.Instance(args)
         self.player = self.instance.media_player_new()
         self.list_player = self.instance.media_list_player_new()
+        self.list_player.set_playback_mode(vlc.PlaybackMode.loop)
         self.list = self.instance.media_list_new()
         self.list_player.set_media_list(self.list)
         self.list_player.set_media_player(self.player)
 
-    def add_to_playlist(self, file_path):
+    def add_to_playlist(self, mrl):
         '''
         Adds a file to the playlist.
 
@@ -54,11 +57,11 @@ class VLCPlaylistManager:
         Returns:
             None   
         '''
-        media = self.instance.media_new(file_path)
+        media = self.instance.media_new(mrl)
         self.list.add_media(media)
-        logging.info('File added to play list: %s', file_path)
+        logging.info('File added to play list: %s', mrl)
 
-    def remove_from_playlist_by_filename(self, file_path):
+    def remove_from_playlist_by_mrl(self, mrl):
         '''
         Removes a file from the playlist. It searches the given path in the playlist and removes it.
 
@@ -68,18 +71,14 @@ class VLCPlaylistManager:
         Returns:
             None   
         '''
-        logging.info('Searching for file %s in play list.', file_path)
+        logging.info('Searching for file %s in play list.', mrl)
         for i in range(self.list.count()):
             media = self.list.item_at_index(i)
             logging.info('Next file: %s', media.get_mrl())
-            print(media.get_mrl())
-            if os.name == 'nt': # for Windows
-                file_prefix = 'file:///'
-            else: # for Linux (and others?)
-                file_prefix = 'file://'
-            if media.get_mrl() == file_prefix + file_path:
+            
+            if media.get_mrl() == mrl:
                 self.list.remove_index(i)
-                logging.info('File removed from play list: %s', file_path)
+                logging.info('File removed from play list: %s', mrl)
                 break
         else:
             logging.warning('Could not remove file from play list: %s. File not found.', file_path)
@@ -129,8 +128,22 @@ class VLCPlaylistManager:
         self.player.stop()
         logging.info('Player stoped.')
 
+    def get_playlist(self):
+        playlist = []
+        for index in range(self.list.count()):
+            playlist.append(self.list.item_at_index(index).get_mrl())
+        return playlist
 
-class FolderHandler(FileSystemEventHandler):
+    def get_mrl(self, file_path):
+        return self.instance.media_new(file_path).get_mrl()
+        
+    def is_playing(self):
+        return self.player.is_playing()
+
+    def will_play(self):
+        return self.player.will_play()
+
+class FolderHandler(object):
     '''
     This class observes the media folder. If a new file is added to this folder, this class adds
     the file to the playlist. If a file is removed, the class also removes it from the playlist.
@@ -138,22 +151,22 @@ class FolderHandler(FileSystemEventHandler):
     Args:
         None
     Attributes:
-        folder_to_watch (str): Path to the media folder which is observed.
+        mount_path (str): Mount path for rclone.
+        local_file_path (str): File path for local files.
     '''
 
-    ALLOWED_EXTENSIONS = {'.mp4', '.avi', '.mkv', '.wmv', '.mov'}
-
-    def __init__(self, folder_to_watch):
-        self.folder_to_watch = folder_to_watch
-
-        self.observer = Observer()
-        self.observer.schedule(self, self.folder_to_watch, recursive=True)
-
-        self.list_of_files = self._get_all_files()
+    def __init__(self, mount_path, local_file_path, allowed_extensions):
+        self.sync_thread = None
+        self.mount_path = mount_path
+        self.local_file_path = local_file_path
+        self.allowed_extensions = allowed_extensions
+        self.window_id = None
 
         self.playlist_manager = VLCPlaylistManager()
-        for file in self.list_of_files:
-            self._add_to_playlist(self.folder_to_watch + file)
+
+        # synchronize mounted files into local file path
+        self._sync_local_files()
+        self._sync_play_list()
 
     def start(self, window_id):
         '''
@@ -165,8 +178,11 @@ class FolderHandler(FileSystemEventHandler):
         Returns:
             None   
         '''
-        self.observer.start()
-        self.playlist_manager.play_playlist(window_id=window_id)
+        self.sync_thread = threading.Thread(target=self.synchronize_thread)
+        self.sync_thread.daemon = True
+        self.sync_thread.start()
+        self.window_id = window_id
+        self.playlist_manager.play_playlist(window_id=self.window_id)
 
     def stop(self):
         '''
@@ -178,68 +194,22 @@ class FolderHandler(FileSystemEventHandler):
         Returns:
             None   
         '''
-        self.observer.stop()
         self.playlist_manager.stop_playlist()
 
-    def on_created(self, event):
-        '''
-        Event is executed when a new file was crated in the observed folder.
-
-        Parameters:
-            event (str): Path to the new file.
-
-        Returns:
-            None   
-        '''
-        if event.is_directory:
-            logging.info('Folder was created: %s.', event.src_path)
-        else:
-            self._add_to_playlist(event.src_path)
-
-    def on_deleted(self, event):
-        '''
-        Event is executed when a file was deleted from the observed folder.
-
-        Parameters:
-            event (str): Path to the deleted file.
-
-        Returns:
-            None   
-        '''
-        if event.is_directory:
-            logging.info('Folder was removed: %s.', event.src_path)
-        else:
-            self.playlist_manager.remove_from_playlist_by_filename(event.src_path)
-
-    def _add_to_playlist(self, file_path):
-        '''
-        Adds a file to the playlist.
-
-        Parameters:
-            file_path (str): Path to the file.
-
-        Returns:
-            None   
-        '''
-        if self._is_allowed_extension(file_path):
-            self.playlist_manager.add_to_playlist(file_path)
-        else:
-            logging.warning('File does not have a supported file extension: %s. Ignoring it.', file_path)
-
-    def _is_allowed_extension(self, file_path):
+    def _has_allowed_extension(self, mrl):
         '''
         Checks if the file extension is supported. If not, the file will be ignored.
 
         Parameters:
-            file_path (str): Path to the file.
+            mrl (str): Mrl of the file.
 
         Returns:
             None   
         '''
-        _, extension = os.path.splitext(file_path)
-        return extension.lower() in self.ALLOWED_EXTENSIONS
+        _, extension = os.path.splitext(mrl)
+        return extension.lower() in self.allowed_extensions
 
-    def _get_all_files(self):
+    def _get_all_media_files(self):
         '''
         Gets all files in the observed folder.
 
@@ -247,13 +217,80 @@ class FolderHandler(FileSystemEventHandler):
             None
 
         Returns:
-            files (list of str)   
+            files (list of mrl)   
         '''
-        files = [f for f in os.listdir(self.folder_to_watch) if os.path.isfile(os.path.join(self.folder_to_watch, f))]
+        files = []
+        for f in os.listdir(self.local_file_path):
+            file = os.path.join(self.local_file_path, f)
+            if os.path.isfile(file) and self._has_allowed_extension(file):
+                files.append(self.playlist_manager.get_mrl(file))
         return files
 
+    def synchronize_thread(self):
+        while True:
+            try:
+                logging.info("Started synchronization.")
+                self._sync_local_files()
+                self._sync_play_list()
+                logging.info("Synchronization successful")
+                logging.info("Player is playing: %s", self.playlist_manager.is_playing())
+                logging.info("Player is able to play: %s", self.playlist_manager.will_play())
+            except:
+                logging.exception("Failed to synchronize data.")
+            time.sleep(10)
 
-class Player(Tk.Frame):
+
+    def _sync_local_files(self):
+        '''
+        Synchornizes destination folder into target folder.
+
+        Parameters:
+            None
+
+        Returns:
+            None
+        '''
+        logging.info('Synchronizing folder. Destination: %s, Target %s.', self.mount_path, self.local_file_path)
+        sync(self.mount_path, self.local_file_path, 'sync', purge=True)
+        self.list_of_files = self._get_all_media_files()
+
+    def _sync_play_list(self):
+        logging.info('Synchronizing play list.')
+        playlist = self.playlist_manager.get_playlist()
+
+        # remove deleted files from playlist
+        for mrl in playlist:
+            if (mrl in self.list_of_files):
+                # file found, nothing to do
+                pass
+            else:
+                # file not found. Delete it from playlist
+                self.playlist_manager.remove_from_playlist_by_mrl(mrl)
+
+        # add new files to playlist
+        for mrl in self.list_of_files:
+            found = False
+            if (mrl in playlist):
+                # mrl found, nothing to do any more
+                found = True
+                break
+            else:
+                # mrl not found. Go on searching.
+                print("not found")
+            
+            if (not found):
+                self.playlist_manager.add_to_playlist(mrl)
+        
+        playlist = self.playlist_manager.get_playlist()
+        count_playlist = len(playlist)
+        if (count_playlist == 0):
+            logging.warning("No tracks in playlist")
+        elif (count_playlist >= 1 and not self.playlist_manager.is_playing() and self.window_id):
+            logging.info("Restart player.")
+            self.playlist_manager.play_playlist(window_id=self.window_id)
+                
+
+class MainWindow(Tk.Frame):
     '''
     Main class which handles the window.
     
@@ -261,51 +298,23 @@ class Player(Tk.Frame):
         None
     Attributes:
         parent (Tk): Root window.
-        folder_to_watch (str): folder which shall be observed.
         title (str): title of the window
     '''
-    def __init__(self, parent, folder_to_watch, title=None):
+    def __init__(self, parent, title=None):
         Tk.Frame.__init__(self, parent)
-
         self.parent = parent  # == root
-        self.parent.title(title or "Automated Player")
+        self.parent.title(title or "VLC Automated Player")
+        self.parent.attributes("-fullscreen", True)
+        self.parent.bind("<Escape>", lambda x: self.parent.destroy())
 
-        # first, top panel shows video
-        self.videopanel = ttk.Frame(self.parent)
-        self.canvas = Tk.Canvas(self.videopanel)
+        # top panel shows video
+        self.canvas = Tk.Canvas(self.parent)
         self.canvas.pack(fill=Tk.BOTH, expand=1)
-        self.videopanel.pack(fill=Tk.BOTH, expand=1)
-
-        
-        # initialize folder handler
-        self.folder_handler = FolderHandler(folder_to_watch)
 
         self.parent.update()
 
-
-    def start(self):
-        '''
-        Starts the observer and the playlist.
-
-        Parameters:
-            None
-
-        Returns:
-            None
-        '''
-        self.folder_handler.start(self.videopanel.winfo_id())
-
-    def stop(self):
-        '''
-        Stops the observer and the playlist.
-
-        Parameters:
-            None
-
-        Returns:
-            None
-        '''
-        self.folder_handler.stop()
+    def get_canvas_id(self):
+        return self.canvas.winfo_id()
 
 
 if __name__ == "__main__":
@@ -325,28 +334,35 @@ if __name__ == "__main__":
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s [%(module)s.%(funcName)s:%(lineno)d] %(message)s'))
 
+    logger.addHandler(file_handler)
+
     logging.info('---------------------- Application started ----------------------')
 
     # read config
     config = configparser.ConfigParser()
     config.sections()
     config.read('config.ini')
+    
+    mount_path = config["settings"]["mount_path"]
+    local_file_path = config["settings"]["local_file_path"]
+    allowed_extensions = config["settings"]["allowed_extensions"].split(',')
+    allowed_extensions = ['.' + extension for extension in allowed_extensions]
 
-    folder_to_watch = config["settings"]["file_path"]
-    logging.info('Path to videos: %s', folder_to_watch)
-
-
+    logging.info('Path to videos: %s', local_file_path)
+    
     # create window
     root = Tk.Tk()
-    root.attributes("-fullscreen", True)
-    root.bind("<Escape>", lambda x: root.destroy())
     
-    # initialize and start player
-    player = Player(parent=root, folder_to_watch=folder_to_watch)
-    player.start()
+    # initialize main window
+    window = MainWindow(parent=root)
+
+    # initialize FolderHandler
+    folder_handler = FolderHandler(mount_path=mount_path, local_file_path=local_file_path, allowed_extensions=allowed_extensions)
+
+    folder_handler.start(window.get_canvas_id())
 
     # run main loop
     root.mainloop()
     
     # if user closes the window, stop the player
-    player.stop()
+    folder_handler.stop()
