@@ -1,3 +1,6 @@
 log
 /config.ini
 test.py
+
+watermark/*
+!watermark/watermark_example.png

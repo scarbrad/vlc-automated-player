@@ -11,6 +11,7 @@ import os
 import sys
 
 import tkinter as Tk
+from PIL import Image, ImageTk
 
 import vlc
 
@@ -19,6 +20,12 @@ from dirsync import sync
 
 _isWindows = sys.platform.startswith('win')
 _isLinux   = sys.platform.startswith('linux')
+
+# Define consants for configuration
+MOUTN_PATH = ''
+LOCAL_FILE_PATH = ''
+ALLOWED_EXTENSIONS = ''
+WATERMARK_FILE = ''
 
 
 
@@ -35,17 +42,41 @@ class VLCPlaylistManager:
     '''
     def __init__(self):
         # VLC player
+        self.WATERMARK_PATH = "watermark/"
+
         args = []
+        # if (os.path.isfile(self.WATERMARK_PATH)):
+            # watermark_options = f"logo-overlay={self.WATERMARK_PATH}"
+            # vlc --video-filter "logo{file=cone.png,opacity=128}" somevideo.avi
+            # args.append(f"logo{{file={self.WATERMARK_PATH},opacity=128}}")
+            # args.append(f"--logo-file={self.WATERMARK_PATH}")
+            # args.append(f"logo-overlay={self.WATERMARK_PATH}")
         if _isLinux:
             args.append('--vout=qt')
         print(args)
         self.instance = vlc.Instance(args)
-        self.player = self.instance.media_player_new()
+        # self.player = self.instance.media_player_new()
+
         self.list_player = self.instance.media_list_player_new()
         self.list_player.set_playback_mode(vlc.PlaybackMode.loop)
         self.list = self.instance.media_list_new()
         self.list_player.set_media_list(self.list)
-        self.list_player.set_media_player(self.player)
+        # self.list_player.set_media_player(self.player)
+
+        self.media_player = self.list_player.get_media_player()
+
+        if (WATERMARK_FILE != ''):
+            watermark_path = self.WATERMARK_PATH + WATERMARK_FILE
+
+            self.media_player.video_set_logo_int(vlc.VideoLogoOption.logo_enable, 1)
+            self.media_player.video_set_logo_string(vlc.VideoLogoOption.logo_file, watermark_path)
+
+            self.media_player.video_set_logo_int(vlc.VideoLogoOption.logo_delay, -1)
+            self.media_player.video_set_logo_int(vlc.VideoLogoOption.logo_x, 10)
+            self.media_player.video_set_logo_int(vlc.VideoLogoOption.logo_y, 10)
+            self.media_player.video_set_logo_int(vlc.VideoLogoOption.logo_opacity, 150)
+            self.media_player.video_set_logo_int(vlc.VideoLogoOption.logo_position, 6)
+            self.media_player.video_set_logo_int(vlc.VideoLogoOption.logo_repeat, -1)
 
     def add_to_playlist(self, mrl):
         '''
@@ -81,7 +112,7 @@ class VLCPlaylistManager:
                 logging.info('File removed from play list: %s', mrl)
                 break
         else:
-            logging.warning('Could not remove file from play list: %s. File not found.', file_path)
+            logging.warning('Could not remove file from play list: %s. File not found.', mrl)
 
     def remove_from_playlist(self, index):
         '''
@@ -109,9 +140,9 @@ class VLCPlaylistManager:
         '''
         # set the window id where to render VLC's video output
         if _isWindows:
-            self.player.set_hwnd(window_id)
+            self.media_player.set_hwnd(window_id)
         else:
-            self.player.set_xwindow(window_id)  # fails on Windows
+            self.media_player.set_xwindow(window_id)  # fails on Windows
         self.list_player.play()
         logging.info('Player started.')
 
@@ -125,7 +156,7 @@ class VLCPlaylistManager:
         Returns:
             None   
         '''
-        self.player.stop()
+        self.media_player.stop()
         logging.info('Player stoped.')
 
     def get_playlist(self):
@@ -138,10 +169,10 @@ class VLCPlaylistManager:
         return self.instance.media_new(file_path).get_mrl()
         
     def is_playing(self):
-        return self.player.is_playing()
+        return self.media_player.is_playing()
 
     def will_play(self):
-        return self.player.will_play()
+        return self.media_player.will_play()
 
 class FolderHandler(object):
     '''
@@ -151,15 +182,14 @@ class FolderHandler(object):
     Args:
         None
     Attributes:
-        mount_path (str): Mount path for rclone.
-        local_file_path (str): File path for local files.
+        None
     '''
 
-    def __init__(self, mount_path, local_file_path, allowed_extensions):
+    def __init__(self):
         self.sync_thread = None
-        self.mount_path = mount_path
-        self.local_file_path = local_file_path
-        self.allowed_extensions = allowed_extensions
+        self.mount_path = MOUTN_PATH
+        self.local_file_path = LOCAL_FILE_PATH
+        self.allowed_extensions = ALLOWED_EXTENSIONS
         self.window_id = None
 
         self.playlist_manager = VLCPlaylistManager()
@@ -237,7 +267,7 @@ class FolderHandler(object):
                 logging.info("Player is able to play: %s", self.playlist_manager.will_play())
             except:
                 logging.exception("Failed to synchronize data.")
-            time.sleep(10)
+            time.sleep(60)
 
 
     def _sync_local_files(self):
@@ -290,6 +320,7 @@ class FolderHandler(object):
             self.playlist_manager.play_playlist(window_id=self.window_id)
                 
 
+
 class MainWindow(Tk.Frame):
     '''
     Main class which handles the window.
@@ -301,15 +332,26 @@ class MainWindow(Tk.Frame):
         title (str): title of the window
     '''
     def __init__(self, parent, title=None):
+        self.logo_path = "C:/Users/marce/git/vlc-automated-player/watermark/Logo_Sporti.png"
+
+
         Tk.Frame.__init__(self, parent)
         self.parent = parent  # == root
-        self.parent.title(title or "VLC Automated Player")
+        #self.parent.title(title or "VLC Automated Player")
         self.parent.attributes("-fullscreen", True)
         self.parent.bind("<Escape>", lambda x: self.parent.destroy())
 
         # top panel shows video
         self.canvas = Tk.Canvas(self.parent)
         self.canvas.pack(fill=Tk.BOTH, expand=1)
+
+        # # Load watermark
+        # self.logo_image = Image.open(self.logo_path)
+        # self.logo_tk = ImageTk.PhotoImage(self.logo_image)
+        # self.logo_image_id = self.canvas.create_image(0, 0, anchor="nw", image=self.logo_tk)
+
+        # # Funktion zum Aktualisieren der Logo-Position in einem Intervall hinzufügen
+        # self.canvas.after(10, self.update_logo_position)
 
         self.parent.update()
 
@@ -343,12 +385,13 @@ if __name__ == "__main__":
     config.sections()
     config.read('config.ini')
     
-    mount_path = config["settings"]["mount_path"]
-    local_file_path = config["settings"]["local_file_path"]
-    allowed_extensions = config["settings"]["allowed_extensions"].split(',')
-    allowed_extensions = ['.' + extension for extension in allowed_extensions]
+    MOUTN_PATH = config["settings"]["mount_path"]
+    LOCAL_FILE_PATH = config["settings"]["local_file_path"]
+    ALLOWED_EXTENSIONS = config["settings"]["allowed_extensions"].split(',')
+    ALLOWED_EXTENSIONS = ['.' + extension for extension in ALLOWED_EXTENSIONS]
+    WATERMARK_FILE = config["settings"]["watermark_file"]
 
-    logging.info('Path to videos: %s', local_file_path)
+    logging.info('Path to videos: %s', LOCAL_FILE_PATH)
     
     # create window
     root = Tk.Tk()
@@ -357,7 +400,7 @@ if __name__ == "__main__":
     window = MainWindow(parent=root)
 
     # initialize FolderHandler
-    folder_handler = FolderHandler(mount_path=mount_path, local_file_path=local_file_path, allowed_extensions=allowed_extensions)
+    folder_handler = FolderHandler()
 
     folder_handler.start(window.get_canvas_id())
 
