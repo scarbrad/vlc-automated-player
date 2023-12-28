@@ -90,7 +90,7 @@ class VLCPlaylistManager:
         '''
         media = self.instance.media_new(mrl)
         self.list.add_media(media)
-        logging.info('File added to play list: %s', mrl)
+        logging.info('File added to play list: %s', media.get_mrl())
 
     def remove_from_playlist_by_mrl(self, mrl):
         '''
@@ -173,6 +173,7 @@ class VLCPlaylistManager:
 
     def will_play(self):
         return self.media_player.will_play()
+
 
 class FolderHandler(object):
     '''
@@ -306,7 +307,7 @@ class FolderHandler(object):
                 break
             else:
                 # mrl not found. Go on searching.
-                print("not found")
+                pass
             
             if (not found):
                 self.playlist_manager.add_to_playlist(mrl)
@@ -372,7 +373,7 @@ if __name__ == "__main__":
         # create folder if it does not exist
         os.makedirs(LOG_FILE_PATTH)
 
-    file_handler = RotatingFileHandler(LOG_FILE_PATTH + LOG_FILE, mode='a', maxBytes=5242880, backupCount=4, encoding=None, delay=False, errors=None)
+    file_handler = RotatingFileHandler(LOG_FILE_PATTH + LOG_FILE, mode='a', maxBytes=5242880, backupCount=4, encoding='utf-8', delay=False, errors=None)
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s [%(module)s.%(funcName)s:%(lineno)d] %(message)s'))
 
